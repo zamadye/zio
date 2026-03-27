@@ -166,6 +166,31 @@ final class Promise[E, A] private (blockingOn: FiberId) extends Serializable {
     ZIO.succeed(unsafe.succeed(a)(trace, Unsafe))
 
   /**
+   * Completes the promise with the result of the specified fiber.
+   *
+   * This provides a more efficient alternative to forking a fiber that
+   * completes the promise and then awaiting the promise. Instead of:
+   * {{{
+   *   val fiber = effect.fork
+   *   promise.await
+   * }}}
+   *
+   * You can write:
+   * {{{
+   *   promise.become(effect.fork)
+   * }}}
+   *
+   * This avoids unnecessary allocations and indirection by directly linking the
+   * fiber to the promise, eliminating the need for a separate awaiting
+   * operation.
+   *
+   * @param fiber The fiber whose result will complete this promise.
+   * @return An effect that completes this promise with the fiber's result.
+   */
+  def become(fiber: => Fiber[E, A])(implicit trace: Trace): UIO[Boolean] =
+    ZIO.succeed(unsafe.become(fiber)(trace, Unsafe))
+
+  /**
    * Internally, you can use this method instead of calling
    * `myPromise.succeed(())`
    *
@@ -342,5 +367,19 @@ object Promise {
 
   object unsafe {
     def make[E, A](fiberId: FiberId)(implicit unsafe: Unsafe): Promise[E, A] = new Promise[E, A](fiberId)
+    def become[E, A](fiber: => Fiber[E, A])(implicit trace: Trace, unsafe: Unsafe): Boolean = {
+      @annotation.tailrec
+      def loop(): Boolean =
+        state.get match {
+          case pending: Pending[?, ?] =>
+            if (state.compareAndSet(pending, Done(fiber.unsafe.await))) {
+              true
+            } else {
+              loop()
+            }
+          case _ => false
+        }
+      loop()
+    }
   }
 }

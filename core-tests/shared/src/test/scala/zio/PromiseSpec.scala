@@ -126,6 +126,75 @@ object PromiseSpec extends ZIOBaseSpec {
         d <- p.isDone
       } yield assert(d)(isTrue)
     } @@ zioTag(errors),
+    test("become completes promise with fiber result") {
+      for {
+        p   <- Promise.make[Nothing, Int]
+        ref <- Ref.make(42)
+        fiber <- (ref.updateAndGet(_ + 10)).fork
+        _     <- p.become(fiber)
+        v    <- p.await
+      } yield assert(v)(equalTo(52))
+    } @@ zioTag(performance),
+    test("become works with multiple waiters") {
+      for {
+        p    <- Promise.make[Nothing, Int]
+        ref1 <- Ref.make(1)
+        ref2 <- Ref.make(2)
+        ref3 <- Ref.make(3)
+        fiber1 <- ref1.updateAndGet(_ + 10).fork
+        fiber2 <- ref2.updateAndGet(_ + 20).fork
+        fiber3 <- ref3.updateAndGet(_ + 30).fork
+        _      <- p.become(fiber1)
+        v1     <- p.await
+        v2     <- p.await
+        v3     <- p.await
+      } yield assert(v1)(equalTo(11)) && assert(v2)(equalTo(22)) && assert(v3)(equalTo(33))
+    } @@ zioTag(performance),
+    test("become with failed fiber propagates failure") {
+      for {
+        p    <- Promise.make[String, Int]
+        ref  <- Ref.make(10)
+        fiber <- (ref.set("error") *> ZIO.fail[String, Int]("boom")).fork
+        _     <- p.become(fiber)
+        v     <- p.await.exit
+      } yield assert(v)(fails(equalTo("boom")))
+    } @@ zioTag(errors),
+    test("waiter stack safety") {
+      for {
+        p   <- Promise.make[Nothing, Int]
+        ref <- Ref.make(42)
+        fiber <- (ref.updateAndGet(_ + 10)).fork
+        _     <- p.become(fiber)
+        v    <- p.await
+      } yield assert(v)(equalTo(52))
+    } @@ zioTag(performance),
+    test("become is more efficient than fork + await") {
+      for {
+        baseline <- Benchmark.benchmark(n)(
+          ZIO.foreach(1 to 10000)(_ => ZIO.succeed(()))
+        )
+        promiseBaseline <- Benchmark.benchmark(n)(
+          ZIO.foreach(1 to 10000) { i =>
+            for {
+              p   <- Promise.make[Nothing, Unit]
+              ref <- Ref.make(i)
+              fiber <- ref.updateAndGet(_ + 1).fork
+              _     <- p.await
+            } yield ()
+          }
+        )
+        becomeBaseline <- Benchmark.benchmark(n)(
+          ZIO.foreach(1 to 10000) { i =>
+            for {
+              p   <- Promise.make[Nothing, Unit]
+              ref <- Ref.make(i)
+              _     <- p.become(ref.updateAndGet(_ + 1).fork)
+            } yield ()
+          }
+        )
+        improvement = ((promiseBaseline.time - becomeBaseline.time) / promiseBaseline.time) * 100
+      } yield assert(improvement)(isGreaterThan(0.0)) && assert(improvement)(isLessThan(100.0))
+    } @@ zioTag(performance),
     test("waiter stack safety") {
       for {
         p      <- Promise.make[Nothing, Unit]
